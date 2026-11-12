@@ -1,4 +1,5 @@
 #include "Logger.hpp"
+#include "MqttProtocol.hpp"
 #include "TcpServer.hpp"
 
 #include <atomic>
@@ -8,6 +9,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 
 #ifndef POCKET_MQTT_VERSION
 #define POCKET_MQTT_VERSION "dev"
@@ -109,17 +111,45 @@ std::optional<Options> parseArguments(int argc, char** argv) {
     return options;
 }
 
-/// Temporary handler for the networking milestone: logs connection lifecycle and traffic.
-class ConnectionLogger final : public IConnectionHandler {
+/// Protocol milestone handler: frames the byte stream into MQTT packets and logs them.
+class PacketInspector final : public IConnectionHandler {
 public:
+    explicit PacketInspector(ITransport& transport) : transport_(transport) {}
+
     void onAccept(ConnectionId id, const std::string& peer) override {
         logInfo("server", "connection #", id, " opened from ", peer);
+        decoders_.emplace(id, mqtt::FrameDecoder(mqtt::Role::Server));
     }
-    void onData(ConnectionId id, const std::uint8_t*, std::size_t size) override {
-        logDebug("server", "connection #", id, " received ", size, " bytes");
+
+    void onData(ConnectionId id, const std::uint8_t* data, std::size_t size) override {
+        const auto it = decoders_.find(id);
+        if (it == decoders_.end()) return;
+        it->second.feed(data, size);
+
+        mqtt::Packet packet;
+        for (;;) {
+            const mqtt::DecodeStatus status = it->second.next(packet);
+            if (status == mqtt::DecodeStatus::NeedMoreData) return;
+            if (status != mqtt::DecodeStatus::Ok) {
+                logWarn("server", "connection #", id, ": ", mqtt::toString(status), ", closing");
+                transport_.close(id);
+                return;
+            }
+            logInfo("server", "connection #", id, " -> ",
+                    mqtt::toString(mqtt::packetTypeOf(packet)));
+        }
     }
-    void onClose(ConnectionId id) override { logInfo("server", "connection #", id, " closed"); }
+
+    void onClose(ConnectionId id) override {
+        decoders_.erase(id);
+        logInfo("server", "connection #", id, " closed");
+    }
+
     void onTick(Clock::time_point) override {}
+
+private:
+    ITransport& transport_;
+    std::unordered_map<ConnectionId, mqtt::FrameDecoder> decoders_;
 };
 
 }  // namespace
@@ -154,7 +184,7 @@ int main(int argc, char** argv) {
         std::signal(SIGINT, handleSignal);
         std::signal(SIGTERM, handleSignal);
 
-        ConnectionLogger handler;
+        PacketInspector handler(server);
         server.run(handler);
 
         g_server.store(nullptr);

@@ -33,6 +33,7 @@ endif()
 # Core library: everything except the command-line entry point.
 add_library(pocket_mqtt_core STATIC
     src/Logger.cpp
+    src/MqttProtocol.cpp
     src/TcpServer.cpp
 )
 target_include_directories(pocket_mqtt_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -48,3 +49,13 @@ endif()
 add_executable(pocket-mqtt src/main.cpp)
 target_link_libraries(pocket-mqtt PRIVATE pocket_mqtt_core pocket_mqtt_warnings)
 target_compile_definitions(pocket-mqtt PRIVATE POCKET_MQTT_VERSION="${PROJECT_VERSION}")
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(pocket_mqtt_tests
+        tests/TestMain.cpp
+        tests/ProtocolTests.cpp
+    )
+    target_link_libraries(pocket_mqtt_tests PRIVATE pocket_mqtt_core pocket_mqtt_warnings)
+    add_test(NAME pocket_mqtt_tests COMMAND pocket_mqtt_tests)
+endif()
