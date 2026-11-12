@@ -214,8 +214,8 @@ void TcpServer::run(IConnectionHandler& handler) {
                 continue;
             }
             short events = 0;
-            if (!connection.closing) events |= POLLIN;
-            if (connection.pendingBytes() > 0) events |= POLLOUT;
+            if (!connection.closing) events = static_cast<short>(events | POLLIN);
+            if (connection.pendingBytes() > 0) events = static_cast<short>(events | POLLOUT);
             if (events != 0) {
                 fds.push_back(makePollFd(connection.socket.native(), events));
                 ids.push_back(id);

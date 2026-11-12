@@ -556,18 +556,24 @@ std::vector<std::uint8_t> encodeConnack(const ConnackPacket& packet) {
 }
 
 std::vector<std::uint8_t> encodePublish(const PublishPacket& packet) {
-    const bool hasPacketId = packet.qos != QoS::AtMostOnce;
-    const std::size_t bodySize =
-        fieldSize(packet.topic.size()) + (hasPacketId ? 2 : 0) + packet.payload.size();
+    return encodePublish(packet.topic, packet.payload.data(), packet.payload.size(), packet.qos,
+                         packet.retain, packet.dup, packet.packetId);
+}
 
-    std::uint8_t flags = static_cast<std::uint8_t>(static_cast<std::uint8_t>(packet.qos) << 1);
-    if (packet.dup) flags |= 0x08;
-    if (packet.retain) flags |= 0x01;
+std::vector<std::uint8_t> encodePublish(std::string_view topic, const std::uint8_t* payload,
+                                        std::size_t payloadSize, QoS qos, bool retain, bool dup,
+                                        std::uint16_t packetId) {
+    const bool hasPacketId = qos != QoS::AtMostOnce;
+    const std::size_t bodySize = fieldSize(topic.size()) + (hasPacketId ? 2 : 0) + payloadSize;
+
+    std::uint8_t flags = static_cast<std::uint8_t>(static_cast<std::uint8_t>(qos) << 1);
+    if (dup) flags |= 0x08;
+    if (retain) flags |= 0x01;
 
     std::vector<std::uint8_t> out = beginPacket(headerByte(PacketType::Publish, flags), bodySize);
-    putString(out, packet.topic);
-    if (hasPacketId) putU16(out, packet.packetId);
-    out.insert(out.end(), packet.payload.begin(), packet.payload.end());
+    putString(out, topic);
+    if (hasPacketId) putU16(out, packetId);
+    out.insert(out.end(), payload, payload + payloadSize);
     return out;
 }
 

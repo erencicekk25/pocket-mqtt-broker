@@ -1,5 +1,5 @@
+#include "BrokerEngine.hpp"
 #include "Logger.hpp"
-#include "MqttProtocol.hpp"
 #include "TcpServer.hpp"
 
 #include <atomic>
@@ -9,7 +9,6 @@
 #include <optional>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 
 #ifndef POCKET_MQTT_VERSION
 #define POCKET_MQTT_VERSION "dev"
@@ -29,6 +28,7 @@ extern "C" void handleSignal(int) {
 
 struct Options {
     TcpServerConfig tcp;
+    BrokerConfig broker;
     LogLevel logLevel = LogLevel::Info;
     bool color = true;
     bool showHelp = false;
@@ -37,16 +37,24 @@ struct Options {
 
 void printUsage() {
     std::printf(
+        "pocket-mqtt %s - a zero-dependency MQTT 3.1.1 broker\n"
+        "\n"
         "Usage: pocket-mqtt [options]\n"
         "\n"
         "Options:\n"
-        "  -b, --bind <address>        IPv4 address to listen on       (default: 0.0.0.0)\n"
-        "  -p, --port <port>           TCP port to listen on            (default: 1883)\n"
-        "      --max-connections <n>   Maximum concurrent connections   (default: 10000)\n"
-        "  -v, --verbose               Enable debug logging\n"
-        "      --no-color              Disable colored output\n"
+        "  -b, --bind <address>        IPv4 address to listen on        (default: 0.0.0.0)\n"
+        "  -p, --port <port>           TCP port, 0 picks a free one      (default: 1883)\n"
+        "      --max-connections <n>   Concurrent connection limit       (default: 10000)\n"
+        "      --max-packet-size <n>   Largest accepted packet in bytes  (default: 1048576)\n"
+        "      --max-queued <n>        QoS 1 messages queued per session (default: 1000)\n"
+        "      --max-inflight <n>      Unacked QoS 1 messages per client (default: 32)\n"
+        "      --stats <seconds>       Log broker statistics periodically (default: off)\n"
+        "  -v, --verbose               Debug logging, including every PUBLISH\n"
+        "  -q, --quiet                 Only log warnings and errors\n"
+        "      --no-color              Disable colored output (NO_COLOR is honored too)\n"
         "  -h, --help                  Show this help and exit\n"
-        "      --version               Show version and exit\n");
+        "      --version               Show version and exit\n",
+        POCKET_MQTT_VERSION);
 }
 
 bool parseUnsigned(std::string_view text, unsigned long long max, unsigned long long& out) {
@@ -65,16 +73,23 @@ std::optional<Options> parseArguments(int argc, char** argv) {
     Options options;
     for (int i = 1; i < argc; ++i) {
         const std::string_view arg = argv[i];
-        const auto nextValue = [&](std::string_view& value) {
+
+        // Fetches and validates the numeric value that follows the current flag.
+        const auto numberArgument = [&](unsigned long long min, unsigned long long max,
+                                        unsigned long long& out) {
             if (i + 1 >= argc) {
                 std::fprintf(stderr, "error: %s requires a value\n", argv[i]);
                 return false;
             }
-            value = argv[++i];
+            const char* value = argv[++i];
+            if (!parseUnsigned(value, max, out) || out < min) {
+                std::fprintf(stderr, "error: invalid value '%s' for %s (expected %llu-%llu)\n",
+                             value, argv[i - 1], min, max);
+                return false;
+            }
             return true;
         };
 
-        std::string_view value;
         unsigned long long number = 0;
         if (arg == "-h" || arg == "--help") {
             options.showHelp = true;
@@ -82,75 +97,58 @@ std::optional<Options> parseArguments(int argc, char** argv) {
             options.showVersion = true;
         } else if (arg == "-v" || arg == "--verbose") {
             options.logLevel = LogLevel::Debug;
+        } else if (arg == "-q" || arg == "--quiet") {
+            options.logLevel = LogLevel::Warn;
         } else if (arg == "--no-color") {
             options.color = false;
         } else if (arg == "-b" || arg == "--bind") {
-            if (!nextValue(value)) return std::nullopt;
-            options.tcp.bindAddress = std::string(value);
-        } else if (arg == "-p" || arg == "--port") {
-            if (!nextValue(value)) return std::nullopt;
-            if (!parseUnsigned(value, 65535, number)) {
-                std::fprintf(stderr, "error: invalid port '%s'\n", std::string(value).c_str());
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "error: %s requires a value\n", argv[i]);
                 return std::nullopt;
             }
+            options.tcp.bindAddress = argv[++i];
+        } else if (arg == "-p" || arg == "--port") {
+            if (!numberArgument(0, 65535, number)) return std::nullopt;
             options.tcp.port = static_cast<std::uint16_t>(number);
         } else if (arg == "--max-connections") {
-            if (!nextValue(value)) return std::nullopt;
-            if (!parseUnsigned(value, 1'000'000, number) || number == 0) {
-                std::fprintf(stderr, "error: invalid connection limit '%s'\n",
-                             std::string(value).c_str());
-                return std::nullopt;
-            }
+            if (!numberArgument(1, 1'000'000, number)) return std::nullopt;
             options.tcp.maxConnections = static_cast<std::size_t>(number);
+        } else if (arg == "--max-packet-size") {
+            if (!numberArgument(64, mqtt::kMaxRemainingLength, number)) return std::nullopt;
+            options.broker.maxPacketSize = static_cast<std::size_t>(number);
+        } else if (arg == "--max-queued") {
+            if (!numberArgument(0, 10'000'000, number)) return std::nullopt;
+            options.broker.maxQueuedMessages = static_cast<std::size_t>(number);
+        } else if (arg == "--max-inflight") {
+            if (!numberArgument(1, 65'000, number)) return std::nullopt;
+            options.broker.maxInflightMessages = static_cast<std::size_t>(number);
+        } else if (arg == "--stats") {
+            if (!numberArgument(0, 86'400, number)) return std::nullopt;
+            options.broker.statsInterval = std::chrono::seconds(number);
         } else {
-            std::fprintf(stderr, "error: unknown option '%s' (see --help)\n",
-                         std::string(arg).c_str());
+            std::fprintf(stderr, "error: unknown option '%s' (see --help)\n", argv[i]);
             return std::nullopt;
         }
     }
     return options;
 }
 
-/// Protocol milestone handler: frames the byte stream into MQTT packets and logs them.
-class PacketInspector final : public IConnectionHandler {
-public:
-    explicit PacketInspector(ITransport& transport) : transport_(transport) {}
-
-    void onAccept(ConnectionId id, const std::string& peer) override {
-        logInfo("server", "connection #", id, " opened from ", peer);
-        decoders_.emplace(id, mqtt::FrameDecoder(mqtt::Role::Server));
-    }
-
-    void onData(ConnectionId id, const std::uint8_t* data, std::size_t size) override {
-        const auto it = decoders_.find(id);
-        if (it == decoders_.end()) return;
-        it->second.feed(data, size);
-
-        mqtt::Packet packet;
-        for (;;) {
-            const mqtt::DecodeStatus status = it->second.next(packet);
-            if (status == mqtt::DecodeStatus::NeedMoreData) return;
-            if (status != mqtt::DecodeStatus::Ok) {
-                logWarn("server", "connection #", id, ": ", mqtt::toString(status), ", closing");
-                transport_.close(id);
-                return;
-            }
-            logInfo("server", "connection #", id, " -> ",
-                    mqtt::toString(mqtt::packetTypeOf(packet)));
-        }
-    }
-
-    void onClose(ConnectionId id) override {
-        decoders_.erase(id);
-        logInfo("server", "connection #", id, " closed");
-    }
-
-    void onTick(Clock::time_point) override {}
-
-private:
-    ITransport& transport_;
-    std::unordered_map<ConnectionId, mqtt::FrameDecoder> decoders_;
-};
+void printBanner(bool color) {
+    const char* accent = color ? "\x1b[38;5;45m" : "";
+    const char* dim = color ? "\x1b[2m" : "";
+    const char* reset = color ? "\x1b[0m" : "";
+    std::printf(
+        "%s"
+        "                 _        _                       _   _   \n"
+        "  _ __  ___  ___| | _____| |_     _ __ ___   __ _| |_| |_ \n"
+        " | '_ \\/ _ \\/ __| |/ / _ \\ __|___| '_ ` _ \\ / _` | __| __|\n"
+        " | |_) | (_) | (__|   <  __/ ||___| | | | | | (_| | |_| |_ \n"
+        " | .__/ \\___/ \\___|_|\\_\\___|\\__|  |_| |_| |_|\\__, |\\__|\\__|\n"
+        " |_|                                            |_|        \n"
+        "%s  v%s  -  zero-dependency MQTT 3.1.1 broker%s\n\n",
+        accent, dim, POCKET_MQTT_VERSION, reset);
+    std::fflush(stdout);
+}
 
 }  // namespace
 
@@ -173,23 +171,29 @@ int main(int argc, char** argv) {
     if (!options->color) {
         logger.setColorEnabled(false);
     }
+    if (options->logLevel != LogLevel::Warn) {
+        printBanner(logger.colorEnabled());
+    }
 
     try {
         TcpServer server(options->tcp);
         server.listen();
-        logInfo("server", "pocket-mqtt ", POCKET_MQTT_VERSION, " listening on ",
-                options->tcp.bindAddress, ':', server.port());
+        BrokerEngine broker(server, options->broker);
 
         g_server.store(&server);
         std::signal(SIGINT, handleSignal);
         std::signal(SIGTERM, handleSignal);
 
-        PacketInspector handler(server);
-        server.run(handler);
-
+        logInfo("server", "listening on mqtt://", options->tcp.bindAddress, ':', server.port(),
+                "  (Ctrl+C to stop)");
+        server.run(broker);
         g_server.store(nullptr);
-        logInfo("server", "shut down cleanly");
+
+        const BrokerStats stats = broker.stats();
+        logInfo("server", "shut down cleanly after ", stats.connectionsAccepted, " connections, ",
+                stats.messagesReceived, " messages in, ", stats.messagesDelivered, " out");
     } catch (const std::exception& error) {
+        g_server.store(nullptr);
         logError("server", "fatal: ", error.what());
         return 1;
     }

@@ -187,6 +187,12 @@ private:
 [[nodiscard]] std::vector<std::uint8_t> encodeConnect(const ConnectPacket& packet);
 [[nodiscard]] std::vector<std::uint8_t> encodeConnack(const ConnackPacket& packet);
 [[nodiscard]] std::vector<std::uint8_t> encodePublish(const PublishPacket& packet);
+/// Same as above, but encodes straight from borrowed topic/payload without copying them first.
+[[nodiscard]] std::vector<std::uint8_t> encodePublish(std::string_view topic,
+                                                      const std::uint8_t* payload,
+                                                      std::size_t payloadSize, QoS qos,
+                                                      bool retain, bool dup,
+                                                      std::uint16_t packetId);
 /// PUBACK, PUBREC, PUBREL, PUBCOMP or UNSUBACK.
 [[nodiscard]] std::vector<std::uint8_t> encodeAck(const AckPacket& packet);
 [[nodiscard]] std::vector<std::uint8_t> encodeSubscribe(const SubscribePacket& packet);

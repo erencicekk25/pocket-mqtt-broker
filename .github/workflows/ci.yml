@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cmake -S . -B build
+          else
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DPOCKET_MQTT_WARNINGS_AS_ERRORS=ON
+          fi
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Unit tests
+        run: ctest --test-dir build -C Release --output-on-failure
+
+  sanitizers:
+    name: ASan + UBSan + LeakSanitizer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DPOCKET_MQTT_SANITIZE=ON -DPOCKET_MQTT_WARNINGS_AS_ERRORS=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Unit tests
+        run: ctest --test-dir build --output-on-failure
+
+      - name: End-to-end load test with leak check on shutdown
+        run: |
+          ./build/pocket-mqtt --port 18830 --quiet --max-queued 1000000 &
+          BROKER_PID=$!
+          sleep 1
+          ./build/mqtt-bench --port 18830 --messages 20000
+          ./build/mqtt-bench --port 18830 --qos 1 --messages 5000
+          ./build/mqtt-bench --port 18830 --mode latency --messages 2000
+          kill -INT "$BROKER_PID"
+          wait "$BROKER_PID"   # Non-zero if the sanitizers reported anything at exit.
