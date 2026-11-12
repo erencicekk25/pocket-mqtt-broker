@@ -1,0 +1,50 @@
+cmake_minimum_required(VERSION 3.16)
+
+project(pocket_mqtt_broker
+    VERSION 0.1.0
+    DESCRIPTION "Zero-dependency MQTT 3.1.1 broker in modern C++17"
+    LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
+option(POCKET_MQTT_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
+
+# Shared warning set, applied to every target we own.
+add_library(pocket_mqtt_warnings INTERFACE)
+if(MSVC)
+    target_compile_options(pocket_mqtt_warnings INTERFACE /W4 /permissive-)
+    if(POCKET_MQTT_WARNINGS_AS_ERRORS)
+        target_compile_options(pocket_mqtt_warnings INTERFACE /WX)
+    endif()
+else()
+    target_compile_options(pocket_mqtt_warnings INTERFACE -Wall -Wextra -Wpedantic -Wshadow)
+    if(POCKET_MQTT_WARNINGS_AS_ERRORS)
+        target_compile_options(pocket_mqtt_warnings INTERFACE -Werror)
+    endif()
+endif()
+
+# Core library: everything except the command-line entry point.
+add_library(pocket_mqtt_core STATIC
+    src/Logger.cpp
+    src/TcpServer.cpp
+)
+target_include_directories(pocket_mqtt_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(pocket_mqtt_core PRIVATE pocket_mqtt_warnings)
+if(WIN32)
+    target_link_libraries(pocket_mqtt_core PUBLIC ws2_32)
+    target_compile_definitions(pocket_mqtt_core PUBLIC _WIN32_WINNT=0x0601)
+endif()
+if(MSVC)
+    target_compile_definitions(pocket_mqtt_core PUBLIC _CRT_SECURE_NO_WARNINGS)
+endif()
+
+add_executable(pocket-mqtt src/main.cpp)
+target_link_libraries(pocket-mqtt PRIVATE pocket_mqtt_core pocket_mqtt_warnings)
+target_compile_definitions(pocket-mqtt PRIVATE POCKET_MQTT_VERSION="${PROJECT_VERSION}")
